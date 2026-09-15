@@ -11,7 +11,7 @@ params = {
     "travel_duration": "2",
     "month": "0",
     "stops": "2",
-    "travel_class": "1",
+    "travel_class": "3",
     "adults": "1",
     "currency": "EUR",
     "hl": "en",
