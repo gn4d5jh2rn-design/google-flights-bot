@@ -9,7 +9,7 @@ params = {
     "departure_id": "AMS",
     "arrival_id": "HKG",
     "travel_duration": "2",
-    "month": "1",
+    "month": "0",
     "stops": "2",
     "travel_class": "1",
     "adults": "1",
