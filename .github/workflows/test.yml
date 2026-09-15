@@ -2,6 +2,11 @@ name: Test Google Flights Search
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"
+    - cron: "0 7 * * *"
+    - cron: "0 18 * * *"
+    - cron: "0 19 * * *"
 
 jobs:
   test:
@@ -19,7 +24,15 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Test flight search
+      - name: Check 36-hour schedule
+        id: schedule_gate
+        if: github.event_name == 'schedule'
+        run: python schedule_gate.py
+
+      - name: Run Flight Tracker
+        if: github.event_name == 'workflow_dispatch' || steps.schedule_gate.outputs.run == 'true'
         env:
           SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
-        run: python verify_direct.py
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python flight_bot.py
