@@ -349,7 +349,7 @@ def build_telegram_message(
         "✈️ FLIGHT TRACKER",
         f"{ORIGIN} ↔ {DESTINATION} | 1-week trips | next 6 months",
         "",
-        "🟢 ECONOMY — BEST 4",
+        "🟢 ECONOMY — BEST VERIFIED",
     ]
 
     if economy:
@@ -455,7 +455,7 @@ def main():
     business = find_business(business_explore)
 
     print("\n======================")
-    print("ECONOMY — TOP 4")
+    print("ECONOMY — BEST VERIFIED")
     print("======================")
 
     for number, trip in enumerate(economy, 1):
