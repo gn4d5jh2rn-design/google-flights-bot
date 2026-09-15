@@ -22,4 +22,4 @@ jobs:
       - name: Test flight search
         env:
           SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
-        run: python test_explore.py
+        run: python flight_bot.py
