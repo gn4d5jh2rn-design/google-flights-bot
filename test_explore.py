@@ -8,6 +8,7 @@ params = {
     "engine": "google_travel_explore",
     "departure_id": "AMS",
     "arrival_id": "HKG",
+    "travel_duration": "1",
     "currency": "EUR",
     "hl": "en",
     "gl": "nl",
