@@ -54,6 +54,7 @@ for i, flight in enumerate(best_flights[:5], 1):
     print("Price:", flight.get("price"))
     print("Total duration:", flight.get("total_duration"))
     print("Layovers:", flight.get("layovers"))
+    print("Departure token:", flight.get("departure_token"))
     print("Flights:")
     
     for segment in flight.get("flights", []):
