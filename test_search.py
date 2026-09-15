@@ -126,3 +126,45 @@ for i, flight in enumerate(return_flights[:10], 1):
             "airline": segment.get("airline"),
             "flight_number": segment.get("flight_number"),
         })
+
+# -------------------------
+# 3. Filter valid returns
+# -------------------------
+
+valid_returns = []
+
+for flight in return_flights:
+    layovers = flight.get("layovers") or []
+
+    if len(layovers) > 1:
+        continue
+
+    if any(layover.get("duration", 9999) > 180 for layover in layovers):
+        continue
+
+    valid_returns.append(flight)
+
+valid_returns.sort(key=lambda x: x.get("price", 999999))
+
+print("\n==============================")
+print("VALID COMPLETE ROUND TRIPS")
+print("==============================")
+
+for i, flight in enumerate(valid_returns, 1):
+    print(f"\n#{i}")
+    print("Round-trip price: €" + str(flight.get("price")))
+    print("Return duration:", flight.get("total_duration"))
+    print("Return layovers:", flight.get("layovers"))
+
+if valid_returns:
+    cheapest = valid_returns[0]
+
+    print("\n==============================")
+    print("CHEAPEST VALID ROUND TRIP")
+    print("==============================")
+    print("Dates:", outbound, "->", return_date)
+    print("Price: €" + str(cheapest.get("price")))
+    print("Outbound layovers:", selected.get("layovers"))
+    print("Return layovers:", cheapest.get("layovers"))
+else:
+    print("\nNo valid return found.")
