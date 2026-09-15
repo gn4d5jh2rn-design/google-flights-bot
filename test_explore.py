@@ -19,13 +19,22 @@ params = {
     "api_key": API_KEY,
 }
 
-response = requests.get(
-    "https://serpapi.com/search.json",
-    params=params,
-    timeout=120,
-)
+for attempt in range(3):
+    try:
+        response = requests.get(
+            "https://serpapi.com/search.json",
+            params=params,
+            timeout=120,
+        )
+        response.raise_for_status()
+        break
+    except requests.RequestException as e:
+        if attempt == 2:
+            raise
+        print(f"Connection failed ({e}). Retrying in 10 seconds...")
+        import time
+        time.sleep(10)
 
-response.raise_for_status()
 data = response.json()
 
 print("Status:", data.get("search_metadata", {}).get("status"))
