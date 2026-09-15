@@ -4,8 +4,8 @@ from datetime import date, timedelta
 
 API_KEY = os.environ["SERPAPI_API_KEY"]
 
-outbound = date.today() + timedelta(days=90)
-return_date = outbound + timedelta(days=7)
+outbound = date(2026, 11, 12)
+return_date = date(2026, 11, 18)
 
 base_params = {
     "engine": "google_flights",
