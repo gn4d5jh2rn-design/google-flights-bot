@@ -168,3 +168,17 @@ if valid_returns:
     print("Return layovers:", cheapest.get("layovers"))
 else:
     print("\nNo valid return found.")
+
+print("\n==============================")
+print("SEARCH METADATA / PARAMETERS")
+print("==============================")
+
+print("Search parameters:")
+print(data.get("search_parameters"))
+
+print("\nAirports:")
+print(data.get("airports"))
+
+print("\nAll top-level keys:")
+for key in data.keys():
+    print(key, "->", type(data[key]).__name__)
