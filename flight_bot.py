@@ -20,7 +20,7 @@ SERPAPI_URL = "https://serpapi.com/search.json"
 ORIGIN = "AMS"
 DESTINATION = "HKG"
 
-TRIP_DURATION_DAYS = 7
+TRIP_DURATION_DAYS = 6
 SEARCH_MONTHS = 6
 
 ECONOMY_MAX_LAYOVER = 180
@@ -128,6 +128,279 @@ async def discover_all_dates():
         discover_dates("business"),
     )
     return economy, business
+
+
+
+# ============================================================
+# FREE ITINERARY PRE-FILTER
+# ============================================================
+
+def valid_gflights_result(flight, max_layover):
+    data = flight.to_dict()
+
+    if data.get("stops", 0) > 1:
+        return False
+
+    layovers = data.get("layovers") or []
+
+    if len(layovers) > 1:
+        return False
+
+    if not layovers:
+        return True
+
+    minutes = layovers[0].get("connection_minutes")
+
+    return (
+        isinstance(minutes, (int, float))
+        and minutes <= max_layover
+    )
+
+
+async def free_search_one(
+    client,
+    semaphore,
+    candidate,
+    filters,
+    max_layover,
+):
+    async with semaphore:
+        try:
+            results = await client.search(
+                origin=ORIGIN,
+                destination=DESTINATION,
+                date=candidate.departure_date,
+                return_date=candidate.return_date,
+                filters=filters,
+            )
+        except Exception as exc:
+            print(
+                f"FREE search failed "
+                f"{candidate.departure_date} → "
+                f"{candidate.return_date}: {exc}"
+            )
+            return None
+
+    valid = [
+        flight
+        for flight in results
+        if valid_gflights_result(
+            flight,
+            max_layover,
+        )
+        and isinstance(flight.price, (int, float))
+    ]
+
+    if not valid:
+        print(
+            f"FREE rejected "
+            f"{candidate.departure_date} → "
+            f"{candidate.return_date} "
+            f"(headline €{candidate.price})"
+        )
+        return None
+
+    best = min(valid, key=lambda flight: flight.price)
+
+    data = best.to_dict()
+    layovers = data.get("layovers") or []
+
+    if layovers:
+        connection = layovers[0]["connection_minutes"]
+        airport = layovers[0].get(
+            "arrival_airport",
+            "?",
+        )
+        hours, mins = divmod(
+            int(connection),
+            60,
+        )
+        layover = f"{airport} {hours}h{mins:02d}"
+    else:
+        layover = "Direct"
+
+    print(
+        f"FREE valid "
+        f"{candidate.departure_date} → "
+        f"{candidate.return_date}: "
+        f"€{best.price} {best.airline} "
+        f"{layover}"
+    )
+
+    return {
+        "candidate": candidate,
+        "free_price": best.price,
+        "free_airline": best.airline,
+        "free_layover": layover,
+    }
+
+
+async def free_prefilter(
+    candidates,
+    travel_class,
+    max_layover,
+):
+    """
+    Search candidate dates for FREE with gflights.
+
+    Dates are processed by headline-price tier.
+
+    Once the cheapest valid itinerary found is cheaper
+    than the next unsearched date tier, more expensive
+    headline dates cannot beat it, so free scanning stops.
+    """
+
+    client = Client(
+        currency="EUR",
+        lang="en",
+        country="NL",
+    )
+
+    filters = SearchFilters(
+        travel_class=travel_class,
+        stops="one-stop",
+    )
+
+    semaphore = asyncio.Semaphore(6)
+
+    by_price = {}
+
+    for candidate in candidates:
+        if not isinstance(
+            candidate.price,
+            (int, float),
+        ):
+            continue
+
+        by_price.setdefault(
+            candidate.price,
+            [],
+        ).append(candidate)
+
+    price_tiers = sorted(by_price)
+
+    viable = []
+    best_valid_price = None
+
+    for index, headline_price in enumerate(
+        price_tiers
+    ):
+        tier = by_price[headline_price]
+
+        print()
+        print(
+            f"FREE scanning €{headline_price} tier "
+            f"({len(tier)} date windows)..."
+        )
+
+        results = await asyncio.gather(
+            *[
+                free_search_one(
+                    client=client,
+                    semaphore=semaphore,
+                    candidate=candidate,
+                    filters=filters,
+                    max_layover=max_layover,
+                )
+                for candidate in tier
+            ]
+        )
+
+        for result in results:
+            if result is None:
+                continue
+
+            viable.append(result)
+
+            if (
+                best_valid_price is None
+                or result["free_price"]
+                < best_valid_price
+            ):
+                best_valid_price = result[
+                    "free_price"
+                ]
+
+        next_price = (
+            price_tiers[index + 1]
+            if index + 1 < len(price_tiers)
+            else None
+        )
+
+        if (
+            best_valid_price is not None
+            and (
+                next_price is None
+                or next_price >= best_valid_price
+            )
+        ):
+            print(
+                f"FREE stopping point reached: "
+                f"best valid €{best_valid_price}; "
+                f"next headline tier "
+                f"{'none' if next_price is None else '€' + str(next_price)}."
+            )
+            break
+
+    viable.sort(
+        key=lambda item: (
+            item["free_price"],
+            item["candidate"].departure_date,
+        )
+    )
+
+    print()
+    print(
+        f"FREE pre-filter produced "
+        f"{len(viable)} viable candidates."
+    )
+
+    for i, item in enumerate(
+        viable[:10],
+        1,
+    ):
+        candidate = item["candidate"]
+
+        print(
+            f"  #{i}: "
+            f"{candidate.departure_date} → "
+            f"{candidate.return_date} | "
+            f"€{item['free_price']} | "
+            f"{item['free_airline']} | "
+            f"{item['free_layover']}"
+        )
+
+    return viable
+
+
+async def free_prefilter_all(
+    economy_dates,
+    business_dates,
+):
+    print()
+    print("==============================")
+    print("FREE PRE-FILTER — ECONOMY")
+    print("==============================")
+
+    economy = await free_prefilter(
+        candidates=economy_candidates,
+        travel_class="economy",
+        max_layover=ECONOMY_MAX_LAYOVER,
+    )
+
+    print()
+    print("==============================")
+    print("FREE PRE-FILTER — BUSINESS")
+    print("==============================")
+
+    business = await free_prefilter(
+        candidates=business_candidates,
+        travel_class="business",
+        max_layover=BUSINESS_MAX_LAYOVER,
+    )
+
+    return economy, business
+
 
 
 # ============================================================
@@ -254,27 +527,20 @@ def return_search(
 
 
 def verify_date(
-    candidate,
+    candidate_info,
     travel_class,
     max_layover,
-    current_best=None,
 ):
-    """
-    Verify one date pair.
-
-    First SerpApi call gets all qualifying outbound options.
-    We then follow outbound tokens in ascending headline-price order.
-
-    We stop following tokens once their displayed starting price
-    cannot improve the best complete round-trip already found.
-    """
+    candidate = candidate_info["candidate"]
 
     outbound_date = candidate.departure_date
     return_date = candidate.return_date
 
     print(
-        f"\nVerifying {outbound_date} → {return_date} "
-        f"(gflights €{candidate.price})"
+        f"\nSERP verifying "
+        f"{outbound_date} → {return_date} | "
+        f"FREE €{candidate_info['free_price']} "
+        f"{candidate_info['free_airline']}"
     )
 
     base = detailed_search(
@@ -293,91 +559,93 @@ def verify_date(
         flight
         for flight in outbounds
         if flight.get("departure_token")
-        and valid_layover(flight, max_layover)
+        and valid_layover(
+            flight,
+            max_layover,
+        )
+        and isinstance(
+            flight.get("price"),
+            (int, float),
+        )
     ]
 
     valid_outbounds.sort(key=price_key)
 
-    best_trip = None
-
-    for outbound in valid_outbounds:
-        if serpapi_searches_this_run >= MAX_SERPAPI_SEARCHES:
-            break
-
-        outbound_price = price_key(outbound)
-
-        # Google Flights' outbound price is the starting round-trip
-        # price for this outbound selection. If it is already no
-        # better than our verified result, later outbounds cannot
-        # improve the result.
-        threshold = None
-
-        if best_trip:
-            threshold = best_trip["price"]
-
-        if current_best:
-            if threshold is None:
-                threshold = current_best["price"]
-            else:
-                threshold = min(
-                    threshold,
-                    current_best["price"],
-                )
-
-        if (
-            threshold is not None
-            and outbound_price != float("inf")
-            and outbound_price >= threshold
-        ):
-            break
-
-        data = return_search(
-            outbound_date=outbound_date,
-            return_date=return_date,
-            travel_class=travel_class,
-            max_layover=max_layover,
-            departure_token=outbound["departure_token"],
+    if not valid_outbounds:
+        print(
+            "SerpApi found no valid outbound."
         )
+        return None
 
-        returns = (
-            data.get("best_flights", [])
-            + data.get("other_flights", [])
+    # Cheapest qualifying outbound. Its displayed price
+    # is Google's starting round-trip price for selecting
+    # this outbound.
+    outbound = valid_outbounds[0]
+
+    data = return_search(
+        outbound_date=outbound_date,
+        return_date=return_date,
+        travel_class=travel_class,
+        max_layover=max_layover,
+        departure_token=outbound[
+            "departure_token"
+        ],
+    )
+
+    returns = (
+        data.get("best_flights", [])
+        + data.get("other_flights", [])
+    )
+
+    valid_returns = [
+        flight
+        for flight in returns
+        if valid_layover(
+            flight,
+            max_layover,
         )
+        and isinstance(
+            flight.get("price"),
+            (int, float),
+        )
+    ]
 
-        valid_returns = [
-            flight
-            for flight in returns
-            if valid_layover(flight, max_layover)
-        ]
+    valid_returns.sort(key=price_key)
 
-        valid_returns.sort(key=price_key)
+    if not valid_returns:
+        print(
+            "SerpApi found no valid return."
+        )
+        return None
 
-        if not valid_returns:
-            continue
+    return_flight = valid_returns[0]
 
-        return_flight = valid_returns[0]
-        final_price = return_flight.get("price")
+    trip = {
+        "price": return_flight["price"],
+        "outbound_date": outbound_date,
+        "return_date": return_date,
+        "outbound_airlines": airlines_text(
+            outbound
+        ),
+        "return_airlines": airlines_text(
+            return_flight
+        ),
+        "outbound_layover": layover_text(
+            outbound
+        ),
+        "return_layover": layover_text(
+            return_flight
+        ),
+    }
 
-        if not isinstance(final_price, (int, float)):
-            continue
+    print(
+        f"VERIFIED: €{trip['price']} | "
+        f"{trip['outbound_airlines']} | "
+        f"{trip['outbound_layover']} / "
+        f"{trip['return_layover']}"
+    )
 
-        trip = {
-            "price": final_price,
-            "outbound_date": outbound_date,
-            "return_date": return_date,
-            "outbound_airlines": airlines_text(outbound),
-            "return_airlines": airlines_text(return_flight),
-            "outbound_layover": layover_text(outbound),
-            "return_layover": layover_text(return_flight),
-        }
-
-        if (
-            best_trip is None
-            or trip["price"] < best_trip["price"]
-        ):
-            best_trip = trip
-
-    return best_trip
+    return trip
 
 
 # ============================================================
@@ -390,53 +658,64 @@ def find_best(
     max_layover,
     reserved_searches=0,
 ):
+    """
+    Candidates are ALREADY ranked using free gflights
+    itinerary searches.
+
+    SerpApi is used only for final round-trip validation.
+    Each candidate costs exactly two searches.
+    """
+
     best = None
 
-    for candidate in candidates:
+    for candidate_info in candidates:
         searches_available = (
             MAX_SERPAPI_SEARCHES
             - serpapi_searches_this_run
             - reserved_searches
         )
 
-        # Need at least:
-        # 1 exact-date search
-        # 1 departure-token return search
         if searches_available < 2:
+            print(
+                "Protected SerpApi budget reached."
+            )
             break
 
-        # Critical stopping rule:
-        #
-        # gflights' date price is the cheapest headline price for
-        # that date pair. Since candidates are ascending by price,
-        # once the next date's minimum is >= our VERIFIED complete
-        # round-trip price, no later date can beat our winner.
+        # If we already have an authoritative verified
+        # price and the next FREE itinerary is not cheaper,
+        # there is no reason to spend another paid search.
         if (
             best is not None
-            and candidate.price is not None
-            and candidate.price >= best["price"]
+            and candidate_info["free_price"]
+            >= best["price"]
         ):
             print(
-                f"Stopping date search: next free-discovery "
-                f"price €{candidate.price} cannot beat verified "
+                f"Stopping SerpApi verification: "
+                f"next FREE candidate "
+                f"€{candidate_info['free_price']} "
+                f"cannot beat verified "
                 f"€{best['price']}."
             )
             break
 
         trip = verify_date(
-            candidate=candidate,
+            candidate_info=candidate_info,
             travel_class=travel_class,
             max_layover=max_layover,
-            current_best=best,
         )
 
-        if trip and (
-            best is None
-            or trip["price"] < best["price"]
+        if (
+            trip is not None
+            and (
+                best is None
+                or trip["price"] < best["price"]
+            )
         ):
             best = trip
+
             print(
-                f"New verified best: €{best['price']} "
+                f"New VERIFIED best: "
+                f"€{best['price']} "
                 f"{best['outbound_date']} → "
                 f"{best['return_date']}"
             )
@@ -497,7 +776,7 @@ def build_telegram_message(
         "✈️ FLIGHT TRACKER",
         (
             f"{ORIGIN} ↔ {DESTINATION} | "
-            f"{TRIP_DURATION_DAYS}-day trips | "
+            f"7-day trips | "
             f"next {SEARCH_MONTHS} months"
         ),
         (
@@ -638,6 +917,15 @@ def main():
 
     # Reserve two searches so Business always gets at least
     # one exact-date search + one return-token verification.
+    print("\nRunning FREE itinerary pre-filter...")
+
+    economy_candidates, business_candidates = asyncio.run(
+        free_prefilter_all(
+            economy_dates=economy_dates,
+            business_dates=business_dates,
+        )
+    )
+
     print("\n==============================")
     print("VERIFYING ECONOMY")
     print("==============================")
@@ -646,7 +934,7 @@ def main():
         candidates=economy_dates,
         travel_class=1,
         max_layover=ECONOMY_MAX_LAYOVER,
-        reserved_searches=2,
+        reserved_searches=4,
     )
 
     print("\n==============================")
