@@ -23,6 +23,7 @@ DESTINATION = "HKG"
 TRIP_DURATION_DAYS = 6
 SEARCH_MONTHS = 6
 
+MIN_LAYOVER = 105
 ECONOMY_MAX_LAYOVER = 180
 BUSINESS_MAX_LAYOVER = 300
 
@@ -207,7 +208,7 @@ def valid_gflights_result(flight, max_layover):
 
     return (
         isinstance(minutes, (int, float))
-        and minutes <= max_layover
+        and MIN_LAYOVER <= minutes <= max_layover
     )
 
 
@@ -497,7 +498,7 @@ def valid_layover(flight, max_minutes):
 
     return (
         isinstance(duration, (int, float))
-        and duration <= max_minutes
+        and MIN_LAYOVER <= duration <= max_minutes
     )
 
 
@@ -556,7 +557,7 @@ def detailed_search(
         "return_date": return_date,
         "travel_class": str(travel_class),
         "stops": "2",
-        "layover_duration": f"0,{max_layover}",
+        "layover_duration": f"{MIN_LAYOVER},{max_layover}",
         "sort_by": "2",
         "adults": "1",
         "currency": "EUR",
@@ -581,7 +582,7 @@ def return_search(
         "return_date": return_date,
         "travel_class": str(travel_class),
         "stops": "2",
-        "layover_duration": f"0,{max_layover}",
+        "layover_duration": f"{MIN_LAYOVER},{max_layover}",
         "sort_by": "2",
         "adults": "1",
         "currency": "EUR",
