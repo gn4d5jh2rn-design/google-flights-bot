@@ -383,7 +383,7 @@ async def free_prefilter_all(
     print("==============================")
 
     economy = await free_prefilter(
-        candidates=economy_candidates,
+        candidates=economy_dates,
         travel_class="economy",
         max_layover=ECONOMY_MAX_LAYOVER,
     )
@@ -394,7 +394,7 @@ async def free_prefilter_all(
     print("==============================")
 
     business = await free_prefilter(
-        candidates=business_candidates,
+        candidates=business_dates,
         travel_class="business",
         max_layover=BUSINESS_MAX_LAYOVER,
     )
