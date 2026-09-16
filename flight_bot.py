@@ -997,7 +997,7 @@ def main():
     print("==============================")
 
     economy = find_best(
-        candidates=economy_dates,
+        candidates=economy_candidates,
         travel_class=1,
         max_layover=ECONOMY_MAX_LAYOVER,
         reserved_searches=4,
@@ -1008,7 +1008,7 @@ def main():
     print("==============================")
 
     business = find_best(
-        candidates=business_dates,
+        candidates=business_candidates,
         travel_class=3,
         max_layover=BUSINESS_MAX_LAYOVER,
         reserved_searches=0,
