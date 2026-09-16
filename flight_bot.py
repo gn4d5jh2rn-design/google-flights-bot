@@ -1,6 +1,10 @@
+import json
 import os
 import time
+from datetime import date, datetime, timedelta
+
 import requests
+
 
 API_KEY = os.environ["SERPAPI_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -14,6 +18,27 @@ DESTINATION = "HKG"
 ECONOMY_MAX_LAYOVER = 180
 BUSINESS_MAX_LAYOVER = 300
 
+STATE_FILE = ".flight_state.json"
+
+# The six-month rolling horizon can touch seven calendar months:
+# e.g. 16 Sep -> 16 Mar.
+MONTH_OFFSETS = 7
+
+# Hard SerpApi budget:
+# 3 Explore
+# Economy: 1 detailed + max 3 return-token searches
+# Direct:  1 detailed + max 1 return-token search
+# Business: 1 detailed + max 1 return-token search
+# TOTAL MAX = 11
+MAX_SEARCHES_PER_RUN = 11
+
+
+def price_key(item):
+    price = item.get("price")
+    if isinstance(price, (int, float)):
+        return price
+    return float("inf")
+
 
 def serpapi(params):
     params = params.copy()
@@ -24,14 +49,13 @@ def serpapi(params):
             response = requests.get(URL, params=params, timeout=120)
             response.raise_for_status()
             return response.json()
-
-        except requests.RequestException as e:
+        except requests.RequestException as exc:
             if attempt == 2:
                 raise
-
-            print(f"Connection failed: {e}")
+            print(f"Connection failed: {exc}")
             print("Retrying in 10 seconds...")
             time.sleep(10)
+
 
 def get_account_status():
     response = requests.get(
@@ -42,12 +66,64 @@ def get_account_status():
     response.raise_for_status()
     return response.json()
 
-def explore(travel_class, stops):
+
+def add_months(value, months):
+    month_index = value.year * 12 + value.month - 1 + months
+    year, month_zero = divmod(month_index, 12)
+    return year, month_zero + 1
+
+
+def horizon_month_keys(today):
+    keys = []
+    for offset in range(MONTH_OFFSETS):
+        year, month = add_months(today, offset)
+        keys.append(f"{year:04d}-{month:02d}")
+    return keys
+
+
+def load_state():
+    empty = {
+        "route": f"{ORIGIN}-{DESTINATION}",
+        "next_month_offset": 0,
+        "scanned_months": [],
+        "economy": [],
+        "direct": [],
+        "business": [],
+    }
+
+    if not os.path.exists(STATE_FILE):
+        return empty
+
+    try:
+        with open(STATE_FILE, "r") as handle:
+            state = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return empty
+
+    # Never mix results from an old route if ORIGIN/DESTINATION changes.
+    if state.get("route") != f"{ORIGIN}-{DESTINATION}":
+        return empty
+
+    for key in ("scanned_months", "economy", "direct", "business"):
+        state.setdefault(key, [])
+
+    state.setdefault("next_month_offset", 0)
+    return state
+
+
+def save_state(state):
+    state["route"] = f"{ORIGIN}-{DESTINATION}"
+
+    with open(STATE_FILE, "w") as handle:
+        json.dump(state, handle, indent=2, sort_keys=True)
+
+
+def explore(travel_class, stops, month):
     return serpapi({
         "engine": "google_travel_explore",
         "departure_id": ORIGIN,
         "arrival_id": DESTINATION,
-        "month": "0",
+        "month": str(month),
         "travel_duration": "2",
         "travel_class": str(travel_class),
         "adults": "1",
@@ -100,7 +176,6 @@ def airlines_text(flight):
 
     for segment in flight.get("flights", []):
         airline = segment.get("airline")
-
         if airline and airline not in airlines:
             airlines.append(airline)
 
@@ -150,14 +225,11 @@ def verify_outbound(
         and flight.get("departure_token")
     ]
 
-    valid_outbounds.sort(
-        key=lambda x: x.get("price", 999999)
-    )
+    valid_outbounds.sort(key=price_key)
 
     complete_trips = []
 
     for outbound in valid_outbounds[:token_limit]:
-
         params = {
             "engine": "google_flights",
             "departure_id": ORIGIN,
@@ -187,9 +259,7 @@ def verify_outbound(
             if valid_layover(flight, max_layover)
         ]
 
-        valid_returns.sort(
-            key=lambda x: x.get("price", 999999)
-        )
+        valid_returns.sort(key=price_key)
 
         if not valid_returns:
             continue
@@ -204,12 +274,10 @@ def verify_outbound(
             "return_layover": layover_text(return_flight),
             "outbound_date": outbound_date,
             "return_date": return_date,
+            "verified_at": datetime.utcnow().isoformat(timespec="seconds"),
         })
 
-    complete_trips.sort(
-        key=lambda x: x.get("price", 999999)
-    )
-
+    complete_trips.sort(key=price_key)
     return complete_trips
 
 
@@ -224,8 +292,8 @@ def find_economy(explore_data):
         stops=2,
     )
 
-    # Verify three outbound candidates.
-    # Search budget is reserved for strict Direct verification.
+    # Three Economy return verifications:
+    # 1 Explore + 1 detailed + 3 tokens = max 5 Economy searches.
     trips = verify_outbound(
         base,
         outbound_date,
@@ -236,7 +304,31 @@ def find_economy(explore_data):
         token_limit=3,
     )
 
-    return trips[:4]
+    return trips
+
+
+def find_direct(explore_data):
+    outbound_date = explore_data["start_date"]
+    return_date = explore_data["end_date"]
+
+    base = detailed_search(
+        outbound_date,
+        return_date,
+        travel_class=1,
+        stops=1,
+    )
+
+    trips = verify_outbound(
+        base,
+        outbound_date,
+        return_date,
+        travel_class=1,
+        stops=1,
+        max_layover=0,
+        token_limit=1,
+    )
+
+    return trips[0] if trips else None
 
 
 def find_business(explore_data):
@@ -250,7 +342,6 @@ def find_business(explore_data):
         stops=2,
     )
 
-    # Verify the cheapest qualifying Business outbound candidate.
     trips = verify_outbound(
         base,
         outbound_date,
@@ -261,34 +352,90 @@ def find_business(explore_data):
         token_limit=1,
     )
 
-    return trips[:1]
+    return trips[0] if trips else None
 
 
-def find_direct(explore_data):
-    outbound_date = explore_data["start_date"]
-    return_date = explore_data["end_date"]
-
-    # Detailed nonstop search.
-    base = detailed_search(
-        outbound_date,
-        return_date,
-        travel_class=1,
-        stops=1,
+def trip_identity(trip):
+    return (
+        trip.get("outbound_date"),
+        trip.get("return_date"),
+        trip.get("outbound_airlines"),
+        trip.get("return_airlines"),
+        trip.get("outbound_layover"),
+        trip.get("return_layover"),
     )
 
-    # Verify the cheapest outbound candidate through its departure token.
-    # With stops=1, both the selected outbound and returned itinerary
-    # must be nonstop.
-    trips = verify_outbound(
-        base,
-        outbound_date,
-        return_date,
-        travel_class=1,
-        stops=1,
-        max_layover=0,
-        token_limit=1,
-    )
 
+def merge_trips(existing, new_trips):
+    merged = {}
+
+    for trip in existing + new_trips:
+        if not isinstance(trip, dict):
+            continue
+
+        identity = trip_identity(trip)
+
+        # If the same itinerary was seen again, retain the newest observation.
+        previous = merged.get(identity)
+
+        if previous is None:
+            merged[identity] = trip
+            continue
+
+        previous_time = previous.get("verified_at", "")
+        new_time = trip.get("verified_at", "")
+
+        if new_time >= previous_time:
+            merged[identity] = trip
+
+    return list(merged.values())
+
+
+def trip_inside_horizon(trip, today):
+    try:
+        outbound = date.fromisoformat(trip["outbound_date"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    # Google Explore defines the flexible window as the next six months.
+    # 183 days is used as the rolling retention boundary.
+    horizon_end = today + timedelta(days=183)
+
+    return today <= outbound <= horizon_end
+
+
+def purge_state(state, today):
+    valid_months = set(horizon_month_keys(today))
+
+    state["scanned_months"] = [
+        month
+        for month in state.get("scanned_months", [])
+        if month in valid_months
+    ]
+
+    for category in ("economy", "direct", "business"):
+        state[category] = [
+            trip
+            for trip in state.get(category, [])
+            if trip_inside_horizon(trip, today)
+        ]
+
+
+def best_economy(state):
+    trips = list(state.get("economy", []))
+    trips.sort(key=price_key)
+    return trips[:3]
+
+
+def best_direct(state):
+    trips = list(state.get("direct", []))
+    trips.sort(key=price_key)
+    return trips[0] if trips else None
+
+
+def best_business(state):
+    trips = list(state.get("business", []))
+    trips.sort(key=price_key)
     return trips[0] if trips else None
 
 
@@ -306,7 +453,6 @@ def print_trip(number, trip):
         f"Return: {trip['return_airlines']} | "
         f"{trip['return_layover']}"
     )
-
 
 
 def format_trip(title, trip):
@@ -328,9 +474,7 @@ def format_renewal_date(value):
     if not value:
         return "Unknown"
 
-    # SerpApi normally returns YYYY-MM-DD or an ISO timestamp.
     try:
-        from datetime import datetime
         clean = str(value)[:10]
         return datetime.strptime(clean, "%Y-%m-%d").strftime("%d/%m/%Y")
     except ValueError:
@@ -344,19 +488,24 @@ def build_telegram_message(
     searches_used,
     searches_limit,
     renewal_date,
+    scanned_months,
+    total_months,
+    searched_month,
 ):
     sections = [
         "✈️ FLIGHT TRACKER",
         f"{ORIGIN} ↔ {DESTINATION} | 1-week trips | next 6 months",
+        (
+            f"📆 Coverage: {scanned_months}/{total_months} calendar months "
+            f"scanned | refreshed {searched_month}"
+        ),
         "",
-        "🟢 ECONOMY — BEST VERIFIED",
+        "🟢 ECONOMY — BEST VERIFIED ACROSS SCANNED MONTHS",
     ]
 
     if economy:
         for number, trip in enumerate(economy, 1):
-            sections.append(
-                format_trip(f"#{number}", trip)
-            )
+            sections.append(format_trip(f"#{number}", trip))
     else:
         sections.append("No qualifying Economy flights found.")
 
@@ -366,10 +515,7 @@ def build_telegram_message(
         format_trip("Nonstop", direct),
         "",
         "🟣 CHEAPEST BUSINESS",
-        format_trip(
-            "Business",
-            business[0] if business else None,
-        ),
+        format_trip("Business", business),
         "",
         (
             f"🔎 SerpApi: {searches_used}/{searches_limit} "
@@ -383,7 +529,7 @@ def build_telegram_message(
 
 def send_telegram(message):
     url = (
-        f"https://api.telegram.org/"
+        "https://api.telegram.org/"
         f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     )
 
@@ -400,6 +546,7 @@ def send_telegram(message):
     response.raise_for_status()
     return response.json()
 
+
 def main():
     account = get_account_status()
 
@@ -414,48 +561,92 @@ def main():
     print(f"Remaining: {searches_left}")
     print(f"Renewal: {renewal_date}")
 
-    # A full run currently needs at most 11 searches.
-    # Keep an additional 2-search safety buffer.
-    if searches_left < 13:
+    # Full run remains capped at 11 searches.
+    # Keep the same additional 2-search safety buffer.
+    if searches_left < MAX_SEARCHES_PER_RUN + 2:
         print(
             "Not enough SerpApi searches remaining "
             "for a complete run. Skipping."
         )
         return
-    
+
+    today = date.today()
+    state = load_state()
+    purge_state(state, today)
+
+    month_offset = int(
+        state.get("next_month_offset", 0)
+    ) % MONTH_OFFSETS
+
+    target_year, target_month = add_months(today, month_offset)
+    target_month_key = f"{target_year:04d}-{target_month:02d}"
+
     print(f"{ORIGIN} ↔ {DESTINATION} flight search")
     print("======================")
+    print(
+        f"Scanning month: {target_month_key} "
+        f"(rotation {month_offset + 1}/{MONTH_OFFSETS})"
+    )
 
-    # 3 flexible-date discovery searches
+    # 3 monthly flexible-date discovery searches.
     economy_explore = explore(
         travel_class=1,
         stops=2,
+        month=target_month,
     )
 
     direct_explore = explore(
         travel_class=1,
         stops=1,
+        month=target_month,
     )
 
     business_explore = explore(
         travel_class=3,
         stops=2,
+        month=target_month,
     )
 
-    # Economy:
-    # 1 detailed search + up to 3 token searches
-    economy = find_economy(economy_explore)
+    # Economy: 1 detailed + up to 3 token searches.
+    economy_new = find_economy(economy_explore)
 
-    # Direct:
-    # 1 detailed nonstop search + up to 1 token search
-    direct = find_direct(direct_explore)
+    # Direct: 1 detailed + up to 1 token search.
+    direct_new = find_direct(direct_explore)
 
-    # Business:
-    # 1 detailed search + up to 1 token search
-    business = find_business(business_explore)
+    # Business: 1 detailed + up to 1 token search.
+    business_new = find_business(business_explore)
+
+    state["economy"] = merge_trips(
+        state.get("economy", []),
+        economy_new,
+    )
+
+    state["direct"] = merge_trips(
+        state.get("direct", []),
+        [direct_new] if direct_new else [],
+    )
+
+    state["business"] = merge_trips(
+        state.get("business", []),
+        [business_new] if business_new else [],
+    )
+
+    if target_month_key not in state["scanned_months"]:
+        state["scanned_months"].append(target_month_key)
+
+    state["next_month_offset"] = (
+        month_offset + 1
+    ) % MONTH_OFFSETS
+
+    purge_state(state, today)
+    save_state(state)
+
+    economy = best_economy(state)
+    direct = best_direct(state)
+    business = best_business(state)
 
     print("\n======================")
-    print("ECONOMY — BEST VERIFIED")
+    print("ECONOMY — BEST VERIFIED ACROSS SCANNED MONTHS")
     print("======================")
 
     for number, trip in enumerate(economy, 1):
@@ -475,21 +666,36 @@ def main():
     print("======================")
 
     if business:
-        print_trip(1, business[0])
+        print_trip(1, business)
     else:
         print("No qualifying Business flight found.")
 
-    print("\nMaximum SerpApi searches this run: 11")
+    print(
+        f"\nMaximum SerpApi searches this run: "
+        f"{MAX_SEARCHES_PER_RUN}"
+    )
 
-    # Refresh account status after the searches so the Telegram
-    # message shows the actual quota remaining after this run.
     final_account = get_account_status()
 
-    final_used = final_account.get("this_month_usage", searches_used)
-    final_limit = final_account.get("searches_per_month", searches_limit)
+    final_used = final_account.get(
+        "this_month_usage",
+        searches_used,
+    )
+
+    final_limit = final_account.get(
+        "searches_per_month",
+        searches_limit,
+    )
+
     final_renewal = final_account.get(
         "plan_renewal_date",
         renewal_date,
+    )
+
+    valid_months = horizon_month_keys(today)
+
+    scanned_count = len(
+        set(state["scanned_months"]) & set(valid_months)
     )
 
     message = build_telegram_message(
@@ -499,6 +705,9 @@ def main():
         searches_used=final_used,
         searches_limit=final_limit,
         renewal_date=final_renewal,
+        scanned_months=scanned_count,
+        total_months=len(valid_months),
+        searched_month=target_month_key,
     )
 
     print("\nTelegram message:")

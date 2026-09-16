@@ -29,6 +29,15 @@ jobs:
         if: github.event_name == 'schedule'
         run: python schedule_gate.py
 
+      - name: Restore flight search state
+        if: github.event_name == 'workflow_dispatch' || steps.schedule_gate.outputs.run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .flight_state.json
+          key: flight-state-v2-${{ github.run_id }}
+          restore-keys: |
+            flight-state-v2-
+
       - name: Run Flight Tracker
         if: github.event_name == 'workflow_dispatch' || steps.schedule_gate.outputs.run == 'true'
         env:
