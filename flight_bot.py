@@ -269,8 +269,8 @@ def verify_date(
     cannot improve the best complete round-trip already found.
     """
 
-    outbound_date = candidate.dep
-    return_date = candidate.ret
+    outbound_date = candidate.departure_date
+    return_date = candidate.return_date
 
     print(
         f"\nVerifying {outbound_date} → {return_date} "
@@ -601,6 +601,28 @@ def main():
         f"Business windows discovered: "
         f"{len(business_dates)}"
     )
+
+    if economy_dates:
+        economy_chronological = sorted(
+            economy_dates,
+            key=lambda x: x.departure_date,
+        )
+        print(
+            "Economy coverage: "
+            f"{economy_chronological[0].departure_date} → "
+            f"{economy_chronological[-1].departure_date}"
+        )
+
+    if business_dates:
+        business_chronological = sorted(
+            business_dates,
+            key=lambda x: x.departure_date,
+        )
+        print(
+            "Business coverage: "
+            f"{business_chronological[0].departure_date} → "
+            f"{business_chronological[-1].departure_date}"
+        )
 
     if economy_dates:
         print(
