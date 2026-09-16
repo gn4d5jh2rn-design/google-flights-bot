@@ -722,45 +722,36 @@ def find_best(
     candidates,
     travel_class,
     max_layover,
-    reserved_searches=0,
+    search_ceiling,
 ):
     """
-    Candidates are ALREADY ranked using free gflights
-    itinerary searches.
+    Verify free-ranked candidates with SerpApi.
 
-    SerpApi is used only for final round-trip validation.
-    Each candidate costs exactly two searches.
+    gflights prices are used ONLY for ranking.
+    They are NOT treated as authoritative lower bounds.
+
+    Each candidate requires exactly two SerpApi calls:
+      1. exact-date outbound search
+      2. return search using departure_token
+
+    search_ceiling is an absolute per-run SerpApi counter
+    ceiling for this cabin.
     """
 
     best = None
+    verified_count = 0
 
     for candidate_info in candidates:
-        searches_available = (
-            MAX_SERPAPI_SEARCHES
-            - serpapi_searches_this_run
-            - reserved_searches
-        )
 
-        if searches_available < 2:
-            print(
-                "Protected SerpApi budget reached."
-            )
-            break
-
-        # If we already have an authoritative verified
-        # price and the next FREE itinerary is not cheaper,
-        # there is no reason to spend another paid search.
+        # Never start a candidate unless both required
+        # SerpApi calls fit inside this cabin's budget.
         if (
-            best is not None
-            and candidate_info["free_price"]
-            >= best["price"]
+            serpapi_searches_this_run + 2
+            > search_ceiling
         ):
             print(
-                f"Stopping SerpApi verification: "
-                f"next FREE candidate "
-                f"€{candidate_info['free_price']} "
-                f"cannot beat verified "
-                f"€{best['price']}."
+                f"Reached verification ceiling "
+                f"{search_ceiling}/{MAX_SERPAPI_SEARCHES}."
             )
             break
 
@@ -769,6 +760,8 @@ def find_best(
             travel_class=travel_class,
             max_layover=max_layover,
         )
+
+        verified_count += 1
 
         if (
             trip is not None
@@ -785,6 +778,12 @@ def find_best(
                 f"{best['outbound_date']} → "
                 f"{best['return_date']}"
             )
+
+    print(
+        f"Verified {verified_count} "
+        f"{'Economy' if travel_class == 1 else 'Business'} "
+        f"date candidate(s) with SerpApi."
+    )
 
     return best
 
@@ -1000,7 +999,7 @@ def main():
         candidates=economy_candidates,
         travel_class=1,
         max_layover=ECONOMY_MAX_LAYOVER,
-        reserved_searches=4,
+        search_ceiling=6,
     )
 
     print("\n==============================")
@@ -1011,7 +1010,7 @@ def main():
         candidates=business_candidates,
         travel_class=3,
         max_layover=BUSINESS_MAX_LAYOVER,
-        reserved_searches=0,
+        search_ceiling=MAX_SERPAPI_SEARCHES,
     )
 
     final_account = get_account_status()
