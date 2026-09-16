@@ -91,6 +91,52 @@ def get_account_status():
 # FREE GOOGLE FLIGHTS DATE DISCOVERY
 # ============================================================
 
+async def gflights_retry(client, operation, label):
+    """
+    Run one gflights operation conservatively.
+
+    Google Flights can temporarily return HTTP 429.
+    On a rate limit, reset the client's blocked state,
+    wait, then retry with increasing cooldowns.
+    """
+    delays = [30, 60, 120, 180]
+
+    for attempt in range(len(delays) + 1):
+        try:
+            return await operation()
+
+        except Exception as exc:
+            text = str(exc)
+
+            if (
+                "429" not in text
+                and "Too Many Requests" not in text
+                and "rate" not in text.lower()
+            ):
+                raise
+
+            if attempt >= len(delays):
+                raise
+
+            delay = delays[attempt]
+
+            print(
+                f"Google Flights rate limit during {label}. "
+                f"Cooling down {delay}s..."
+            )
+
+            try:
+                client.reset_rate_limit()
+            except Exception:
+                pass
+
+            await asyncio.sleep(delay)
+
+    raise RuntimeError(
+        f"Google Flights retry exhausted: {label}"
+    )
+
+
 async def discover_dates(travel_class):
     client = Client(
         currency="EUR",
@@ -103,13 +149,17 @@ async def discover_dates(travel_class):
         stops="one-stop",
     )
 
-    results = await client.cheapest_dates(
-        origin=ORIGIN,
-        destination=DESTINATION,
-        date=date.today().isoformat(),
-        months=SEARCH_MONTHS,
-        trip_duration_days=TRIP_DURATION_DAYS,
-        filters=filters,
+    results = await gflights_retry(
+        client,
+        lambda: client.cheapest_dates(
+            origin=ORIGIN,
+            destination=DESTINATION,
+            date=date.today().isoformat(),
+            months=SEARCH_MONTHS,
+            trip_duration_days=TRIP_DURATION_DAYS,
+            filters=filters,
+        ),
+        f"{travel_class} date discovery",
     )
 
     # gflights normally already orders these by price,
@@ -123,10 +173,14 @@ async def discover_dates(travel_class):
 
 
 async def discover_all_dates():
-    economy, business = await asyncio.gather(
-        discover_dates("economy"),
-        discover_dates("business"),
-    )
+    economy = await discover_dates("economy")
+
+    # Avoid hammering Google Flights with back-to-back
+    # simultaneous flexible-date requests.
+    await asyncio.sleep(5)
+
+    business = await discover_dates("business")
+
     return economy, business
 
 
@@ -166,13 +220,26 @@ async def free_search_one(
 ):
     async with semaphore:
         try:
-            results = await client.search(
-                origin=ORIGIN,
-                destination=DESTINATION,
-                date=candidate.departure_date,
-                return_date=candidate.return_date,
-                filters=filters,
+            results = await gflights_retry(
+                client,
+                lambda: client.search(
+                    origin=ORIGIN,
+                    destination=DESTINATION,
+                    date=candidate.departure_date,
+                    return_date=candidate.return_date,
+                    filters=filters,
+                ),
+                (
+                    f"{candidate.departure_date} → "
+                    f"{candidate.return_date}"
+                ),
             )
+
+            # Deliberately conservative. Google Flights is
+            # unofficially accessed by gflights and can rate-limit
+            # bursts of requests.
+            await asyncio.sleep(2)
+
         except Exception as exc:
             print(
                 f"FREE search failed "
@@ -261,7 +328,7 @@ async def free_prefilter(
         stops="one-stop",
     )
 
-    semaphore = asyncio.Semaphore(6)
+    semaphore = asyncio.Semaphore(1)
 
     by_price = {}
 
@@ -293,18 +360,17 @@ async def free_prefilter(
             f"({len(tier)} date windows)..."
         )
 
-        results = await asyncio.gather(
-            *[
-                free_search_one(
-                    client=client,
-                    semaphore=semaphore,
-                    candidate=candidate,
-                    filters=filters,
-                    max_layover=max_layover,
-                )
-                for candidate in tier
-            ]
-        )
+        results = []
+
+        for candidate in tier:
+            result = await free_search_one(
+                client=client,
+                semaphore=semaphore,
+                candidate=candidate,
+                filters=filters,
+                max_layover=max_layover,
+            )
+            results.append(result)
 
         for result in results:
             if result is None:
